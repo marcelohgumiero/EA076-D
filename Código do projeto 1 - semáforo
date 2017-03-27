@@ -16,106 +16,145 @@
 int state = 0; // Variavel de estado
 
 // Atribuindo nomes a cada pino de saída/entrada
+int buzzer = 7;
 int red_car = 8;
 int yellow_car = 9;
 int green_car = 10;
 int red_people = 11;
 int green_people = 12;
-int button = 4;
+int button = 13;
 int ldr = A5;
-
+int time_day = 0; // Variavel de tempo, utilizada para garantir que voltou a ser dia (vide estado 4)
 int time_counter = 0; // Variavel de tempo, utilizada nas rotinas dos estados
-
+int allow_night = 0; // Flag para permitir a leitura do ldr
+int allow_people = 0; // Flag para permitir a passagem de pessoas
+int time_buzzer = 0; // Flag para tocar buzzer durante o verde dos pedestres
 void handler_timer(){
-	// Rotina que ira tratar a interrupcao, sera utilizada como timer e para alternancia de estados
-	if(state == 0){
-		// Neste estado, temos verde para os carros e vermelho para os pedestres
-		digitalWrite(green_people,LOW);
-		digitalWrite(yellow_car,LOW);
-		digitalWrite(red_car,LOW);
-		digitalWrite(green_car,HIGH);
-		digitalWrite(red_people,HIGH);
-	}
-	if(state == 1){
-		// Quando o pedestre pressiona o botao, acende o amarelo para os carros
-		time_counter++;
-		digitalWrite(green_car,LOW);
-		digitalWrite(yellow_car,HIGH);
-		if(time_counter == 6){
-			// Quando a variavel de tempo chega em 6, ou seja, passados 3 segundos, mudamos de estado
-			state = 2;
-			time_counter = 0;
-		}
-	}
-	if(state == 2){
-		// Neste estado, temos verde para o pedestre e vermelho para os carros
-		time_counter++;
-		digitalWrite(yellow_car,LOW);
-		digitalWrite(red_people,LOW);
-		digitalWrite(red_car,HIGH);
-		digitalWrite(green_people,HIGH);
-		if(time_counter == 10){
-			// Passados 5 segundos, mudamos de estado
-			state = 3;
-			time_counter = 0;
-		}
-	}
-	if(state == 3){
-		// Neste estado, esperamos que o pedestre ja tenha atravessado a rua,
-		// entao, o vermelho para os pedestres comeca a piscar, indicando o fim de sua passagem
-		// Optamos por deixar o verde aceso, evitando uma possivel confusao por parte dos motoristas
-		time_counter++;
-		digitalWrite(red_people, !digitalRead(red_people));
-		if(time_counter == 5){ 
-			// Apos piscar o vermelho tres vezes, retornamos ao estado normal (estado 0)
-			state = 0;
-			time_counter = 0;
-		}
-	}
-	if(state == 4){
-		// Para o estado 4, temos uma situacao onde ja eh noite
-		// portanto, para garantir a seguranca dos motoristas
-		// o amarelo dos carros fica piscando e o semaforo dos pedestres, desligado
-		digitalWrite(green_people,LOW);
-		digitalWrite(red_car,LOW);
-		digitalWrite(green_car,LOW);
-		digitalWrite(red_people,LOW);
-		digitalWrite(yellow_car,!digitalRead(yellow_car));
-		if(analogRead(ldr) > 500){
-			// Caso fique dia, novamente, voltamos ao estado usual (estado 0)
-			// Oberse que esta eh a unica forma de retornarmos ao estado 0
-			state = 0;
-		}
-	}
+  // Rotina que ira tratar a interrupcao, sera utilizada como timer e para alternancia de estados
+  if(state == 0){
+    // Neste estado, temos verde para os carros e vermelho para os pedestres
+    digitalWrite(green_people,LOW);
+    digitalWrite(yellow_car,LOW);
+    digitalWrite(red_car,LOW);
+    digitalWrite(buzzer, LOW);
+    digitalWrite(green_car,HIGH);
+    digitalWrite(red_people,HIGH);
+    allow_night = 1; // Permitira a leitura do ldr, caso o estado 0 tenha sido executado
+    allow_people = 1; // Permitira a leitura do botao, caso o estado 0 tenha sido executado
+  }
+  if(state == 1){
+    // Quando o pedestre pressiona o botao, acende o amarelo para os carros
+    allow_night = 0; // Nao permite alternancia para o modo noturno caso o pedestre esteja atravessando
+    time_counter++;
+    if(time_counter >= 4){
+      // Soh acende o amarelo apos 2 segundo apos o botao ser apertado
+      digitalWrite(green_car,LOW);
+      digitalWrite(yellow_car,HIGH);  
+    }
+    if(time_counter == 10){
+      // Quando a variavel de tempo chega em 10, ou seja, passados 3 segundos apos o acendimento, mudamos de estado
+      state = 2;
+      time_counter = 0;
+    }
+  }
+  if(state == 2){
+    // Neste estado, temos verde para o pedestre e vermelho para os carros
+    time_counter++;
+    digitalWrite(yellow_car,LOW);
+    digitalWrite(red_people,LOW);
+    digitalWrite(red_car,HIGH);
+    digitalWrite(green_people,HIGH);
+    if(!(time_buzzer % 2)){
+      // Caso o resto da divisao por dois seja 0, ou seja, a cada 1 segundo, acionamos o buzzer
+      digitalWrite(buzzer, !digitalRead(buzzer)); 
+    }
+    time_buzzer++;
+    if(time_counter == 10){
+      // Passados 5 segundos, mudamos de estado
+      state = 3;
+      time_counter = 0;
+      time_buzzer = 0;
+    }
+  }
+  if(state == 3){
+    // Neste estado, esperamos que o pedestre ja tenha atravessado a rua,
+    // entao, o vermelho para os pedestres comeca a piscar, indicando o fim de sua passagem
+    time_counter++;
+    digitalWrite(green_people, LOW);
+    digitalWrite(red_people, !digitalRead(red_people));
+    digitalWrite(buzzer, !digitalRead(buzzer));
+    if(time_counter == 5){ 
+      // Apos piscar o vermelho tres vezes, retornamos ao estado normal (estado 0)
+      state = 0;
+      time_counter = 0;
+    }
+  }
+  if(state == 4){
+    // Para o estado 4, temos uma situacao onde ja eh noite
+    // portanto, para garantir a seguranca dos motoristas
+    // o amarelo dos carros fica piscando e o semaforo dos pedestres, desligado
+    // observe que o semaforo soh ira alternar para o modo noturno caso passe 5 segundos no escuro
+    time_counter++;
+    allow_people = 0;
+    if(time_counter >= 10){
+      if(time_counter == 500){
+        // Garantir que nao havera estouro da variavel
+        time_counter = 10;
+      }
+      // Enquando for noite, executa a rotina para piscar o amarelo dos carros
+      digitalWrite(green_people,LOW);
+      digitalWrite(red_car,LOW);
+      digitalWrite(green_car,LOW);
+      digitalWrite(red_people,LOW);
+      digitalWrite(yellow_car,!digitalRead(yellow_car));
+      if(analogRead(ldr) < 500){
+        // Caso fique dia, novamente, voltamos ao estado usual (estado 0)
+        // Oberse que esta eh a unica forma de retornarmos ao estado 0
+        // Zeramos o contador
+        time_day++;
+        if(time_day == 10){
+          // O semaforo volta considerar como dia, apos 5 segundos de ilumnicao continua
+          state = 0;
+          time_counter = 0;
+          time_day = 0;
+        }
+      }
+      if(analogRead(ldr) > 500){
+        // Caso um carro ilumine o sensor, mas ainda eh noite, ele volta o contador para zero
+        time_day = 0;
+      }
+    }
+  }
 }
 
 void setup(){
-	// Configurando os pinos como entrada ou saida,
-	// utilizando como referencia os nomes definidos no inicio do programa
-	pinMode(red_car,OUTPUT);
-	pinMode(yellow_car,OUTPUT);
-	pinMode(green_car,OUTPUT);
-	pinMode(red_people,OUTPUT);
-	pinMode(green_people,OUTPUT);
-	pinMode(button,INPUT);
-	pinMode(ldr,INPUT);
-	// Configurando a rotina de interrupcao
-	Timer1.initialize(500000); // Interrompe a cada 0.5s
-	Timer1.attachInterrupt(handler_timer); // A cada interrupcao chamaremos a rotina previamente definida (handler_timer)  
+  // Configurando os pinos como entrada ou saida,
+  // utilizando como referencia os nomes definidos no inicio do programa
+  pinMode(buzzer,OUTPUT);
+  pinMode(red_car,OUTPUT);
+  pinMode(yellow_car,OUTPUT);
+  pinMode(green_car,OUTPUT);
+  pinMode(red_people,OUTPUT);
+  pinMode(green_people,OUTPUT);
+  pinMode(button,INPUT);
+  pinMode(ldr,INPUT);
+  // Configurando a rotina de interrupcao
+  Timer1.initialize(500000); // Interrompe a cada 0.5s
+  Timer1.attachInterrupt(handler_timer); // A cada interrupcao chamaremos a rotina previamente definida (handler_timer)  
 }
 
 void loop(){
-	// Nesta rotina, colocamos tudo que sera testado continuamente
-	// atente ao fato de que o botao do pedestre soh ira funcionar caso o estado atual seja 0,
-	// isto eh, caso tenhamos vermelho para os pedestres e verde para os carros
-	// alem disso, soh entraremos na rotina do estado 4 (noite), caso nenhum pedestre esteja atravessando a rua
-	// Enquando for noite, o semaforo dos pedestre nao funciona
-	if((digitalRead(button)) &&  (state == 0)){
-		// Testamos se o botao foi pressionado, caso fora, mudamos para o estado 1
-		state = 1;
-	}
-	if((analogRead(ldr) < 500) &&  (state == 0)){
-		// Testamos se ja eh noite, caso seja, mudamos para o estado 4
-		state = 4;
-	}
+  // Nesta rotina, colocamos tudo que sera testado continuamente
+  // atente ao fato de que o botao do pedestre soh ira funcionar caso o estado atual seja 0,
+  // isto eh, caso tenhamos vermelho para os pedestres e verde para os carros
+  // alem disso, soh entraremos na rotina do estado 4 (noite), caso nenhum pedestre esteja atravessando a rua
+  // Enquando for noite, o semaforo dos pedestre nao funciona
+  if((digitalRead(button)) &&  (allow_people)){
+    // Testamos se o botao foi pressionado, caso fora, mudamos para o estado 1
+    state = 1;
+  }
+  if((analogRead(ldr) > 500) &&  (allow_night)){
+    // Testamos se ja eh noite, caso seja, mudamos para o estado 4
+    state = 4;
+  }
 }
