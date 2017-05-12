@@ -1,0 +1,330 @@
+// Grupo :
+// ADRIANO TENÓRIO HALIM DARSONO 154468
+// MARCELO HENRIQUE GUMIERO      156529
+// Neste projeto, foi construido um datalogger, cuja propósito é o de, a partir de medições de um sensor LDR
+// armazenar estes valores numa memória, no caso do projeto, foi utilizada uma EEPROM AT24C16.
+// O sistema é composto pelo sensor LDR, por uma central de processamento (arduino) e pela memória.
+// Para leitura e controle de dados, foi empregado um teclado matricial com algumas funções pré definidas, bem como
+// uma comunicação serial entre o computador e o arduino.
+
+// - BIBLIOTECAS
+#include "Wire.h"           // Biblioteca para implementação da comunicação I2C
+#include <TimerOne.h>       // Biblioteca para implementação de interrupções
+#include <AH_24Cxx.h>       // Biblioteca EEPROM - http://arduino.alhin.de/index.php?n=61
+#define AT24C16 4           // Definição utilizada para configurar corretamente a comunicação, utilizando a biblioteca acima
+
+// - PINAGEM
+// Definição da pinagem utilizada pelos periféricos
+int ldr = A0;                 // Sensor de luminosidade
+int col[3] = {4, 5, 6};       // Colunas do teclado matricial
+int lin[4] = {8, 9, 10, 11};  // Linhas do teclado matricial
+int LED = 13;                 // LED
+
+// - VARIAVEIS
+char simbolos[4][3] = { // Matriz utilizada como referência para o teclado matricial
+  {'1', '2', '3'},
+  {'4', '5', '6'},
+  {'7', '8', '9'},
+  {'*', '0', '#'}
+};
+
+String ID = "Grupo - Adriano e Marcelo"; // String de identificação do grupo
+
+int pos_memoria = 0; // Indica a posicação de memória no EEPROM
+
+char buffer[100]; // Buffer utilizado na recepção das mensagens do computador via UART
+int i_buffer = 0; // Índice utilizado para o armazenamento das mensagens no buffer
+
+char buffer_teclado[100]; // Buffer utilizado para a recepção de mensagens do teclado matricial
+int i_buffer_teclado = 0; // Índice utilizado para o armazenamento das mensagens no buffer do teclado matricial
+
+int pisca_led = 0;              // Flag utilizado na rotina de verificação de funcionamento do sistema através do teclado matricial
+int medicao_automatica = 0;     // Flag utilizado para a ativação/desativação do modo de medição automática, escolhido através do teclado matricial
+int medir_automaticamente = 0;  // Flag utilizada para, a partir da flag acima, permitir a gravação automática
+
+// - ROTINAS
+AH_24Cxx ic_eeprom = AH_24Cxx(AT24C16, 0); // Definindo que iremos utilizar a 4ª opção da biblioteca,
+// no caso o AT24C16 (observe que foi definido AT24C16 = 4 no início do programa)
+
+void handler_timer() {
+  // Rotina que ira tratar a interrupcao, será utilizada como timer e para alternância de estados a partir de eventos relacionados ao teclado matricial
+  digitalWrite(LED, LOW);
+  if (pisca_led) { // Indica que o sistema está responsivo. Note que, como estamos utilizando uma interrupção de 1s, o LED ficará aceso por 1s.
+    digitalWrite(LED, HIGH);
+    pisca_led = 0;
+  }
+  if (medicao_automatica) {
+    // Foi observado que, se fizessemos a gravação dentro da rotina de interrupção, o programa travava.
+    // Nesse sentido, o professor sugeriu que as rotinas da biblioteca Wire promovem um travamento por conta
+    // da necessidade de interrupções internas. Dessa forma, foi tratada a medição automática, através de uma outra flag (medir_automaticamente)
+    // Nesse caso, a rotina de interrupção foi utilizada para definir o tempo entre as gravações.
+    medir_automaticamente = 1;
+  }
+}
+
+int analizar_get() {
+  // Nesta rotina, a partir da recepção de uma mensagem da UART (serial), o programa analise se a mensagem
+  // recebida é do tipo: GET N. Onde N seria a posição de memória a ser lida da EEPROM.
+  // Observe que foi escolhido tratar a primeira parte da mensagem (retornando 1 se for GET) e então
+  // tratar o número N recebido em outra parte do código (vide LOOP)
+  char buffer_aux[100];
+  int i = 0;
+  while (i != 3) {
+    buffer_aux[i] = buffer[i];
+    i++;
+  }
+  if (i == 3) {
+    buffer_aux[i] = '\0';
+    if (strcmp("GET", buffer_aux) == 0) {
+      return 1;
+    }
+    else {
+      return 0;
+    }
+  }
+  return 0;
+}
+
+char varrer_teclado() {
+  // Rotina utilizada para fazer varredura do teclado matricial.
+  // O algoritimo utilizado levou em conta a estratégia contida no roteiro do experimento.
+  // Quando a tecla da linha i e coluna j for pressionada, existirá um caminho de baixa impedância entre a linha i e coluna j.
+  // Sabendo disso, podemos colocar a linha i em nível lógico baixo (0 V) e então fazer a leitura de todas as colunas.
+  // Quando a leitura retornar um nível lógico baixo, sabemos que esta posição está sendo pressionada e, portanto, podemos
+  // buscar na matriz de símbolos definida no início do código.
+  int i, j;
+  for (i = 0; i < 4; i++) {
+    digitalWrite(lin[i], LOW);
+    for (j = 0; j < 3; j++) {
+      if (digitalRead(col[j]) == LOW) {
+        digitalWrite(lin[i], HIGH);
+        char simb = simbolos[i][j];
+        return simb;
+      }
+    }
+    digitalWrite(lin[i], HIGH);
+  }
+  return 'a'; // Foi convencionado que, caso nenhuma tecla tenha sido pressionada, a rotina retornaria "a".
+  // Portanto, sabemos exatamente quando a varredura não retornou algo realmente relacionado ao teclado.
+}
+
+void setup() {
+  // Aqui, definimos os parâmetros a serem iniciados no código.
+  Wire.begin();                           // Inicializa a comunicação I2C.
+  Serial.begin(9600);                     // Inicializa a comunicação serial com baud rate de 9600.
+  Timer1.initialize(1000000);             // Interrompe a cada 1s.
+  Timer1.attachInterrupt(handler_timer);  // A cada interrupcao chamaremos a rotina previamente definida (handler_timer).
+
+  // A partir desta parte, foram feitas as atribuições de entrada e saída para cada periférico utilizado.
+  int i, j;
+  for (i = 0; i < 4; i++) {
+    pinMode(lin[i], OUTPUT);
+    digitalWrite(lin[i], HIGH);
+  }
+  for (i = 0; i < 3; i++) {
+    pinMode(col[i], INPUT);
+  }
+  pinMode(LED, OUTPUT);
+  pinMode(ldr, INPUT);
+}
+
+void loop() {
+  // Aqui, definimos a rotina a ser executada repetidamente.
+  // Na primeira etapa, foram tradadas as informações recebidas através da comunicação serial (UART)
+  // Para tal, foi utilzado um buffer. A fim de verificar e validar as informações recebidas, foi utilizada a função "strcmp".
+  while (Serial.available() > 0) {
+    // Recepção da mensagem e, em seguida, gravação da mensagem no buffer.
+    buffer[i_buffer] = Serial.read();
+    i_buffer++;
+    if (buffer[i_buffer - 1] == '\n') {
+      buffer[i_buffer - 1] = '\0';
+      // Uma vez que a mensagem foi armazenada no buffer, podemos fazer as comparações com as mensagens esperadas
+      // e então tomar as execuções desejadas.
+      if (strcmp("PING", buffer) == 0) {
+        Serial.println("PONG");
+      }
+      else if (strcmp("ID", buffer) == 0) {
+        Serial.println(ID);
+      }
+      else if (strcmp("MEASURE", buffer) == 0) {
+        // Faz uma leitura simples do sensor e imprime o resultado no monitor serial.
+        Serial.println(analogRead(ldr));
+      }
+      else if (strcmp("MEMSTATUS", buffer) == 0) {
+        // Imprime, no monitor serial, o número de elementos contidos na memória EEPROM, a partir do índice de posição atual na memória.
+        Serial.println(pos_memoria);
+      }
+      else if (strcmp("RESET", buffer) == 0) {
+        // Reseta a memória. A maneira mais simples encontrada foi a de, simplesmente, zerar a variável que corresponde
+        // à posição atual da memória.
+        pos_memoria = 0;
+      }
+      else if (strcmp("RECORD", buffer) == 0) {
+        // Realiza uma medição do sensor LDR e grava tal valor na memória.
+        // Por escolha, a primeira posição da EEPROM é a posição 1.
+        // Como pos_memoria foi inicial em zero, devemos incrementar tal posição e, então, realizar a gravação.
+        pos_memoria++;
+        byte medida_armazenar = (byte)(analogRead(ldr) >> 2); // Dado que a leitura analógica nos retorna 10 bits de informação,
+        // devemos deslocar 2 bits, para que possamos fazer a gravação na EEPROM, que comporta 8 bits.
+        ic_eeprom.write_byte(pos_memoria, medida_armazenar);  // A gravação na memória foi feita a partir da utilização da biblioteca previamente apresentada.
+      }
+      else if (analizar_get()) {
+        // Caso a função declarada anteriormente retorne 1, ou seja, caso exista uma string do tipo GET N,
+        // o próximo passo é analizar o número "N" contendo a informação da posição de memória.
+        // Note que o número desejado está referenciado a partir da quarta posição, devemos levar isso em consideração para a aquisição do número.
+        int j = 4;
+        char numero[10]; // Buffer auxiliar
+        while (buffer[j] != '\0') {
+          numero[j - 4] = buffer[j];
+          j++;
+        }
+        int valor_memoria = atoi(numero); // Fazemos a conversão de char para INT
+        if (valor_memoria > 0 && valor_memoria < pos_memoria + 1) { // A condição garante que não acessemos valores inexistentes de memória,
+          Serial.println(ic_eeprom.read_byte(valor_memoria));       // ou pelo menos ainda não gravados com informações
+        }
+        else {
+          Serial.println("ERRO - posicao nao encontrada");
+        }
+      }
+      i_buffer = 0; // Por fim, zeramos o buffer da recepção da mensagem, a fim de garantir uma leitura correta numa próxima aquisição.
+    }
+  }
+  // Nesta segunda parte do LOOP, analizamos as informações recebidas a partir do teclado matricial.
+  // Nesse caso, foi utilizada a rotina "varrer_teclado" e um buffer específico para esta parte do código.
+  // A estratégia implementada foi a de gravar todas as informações recebidas no buffer e, finalmente, quando
+  // o "*" fosse apertado, processariamos os dois digitos anteriores.
+  if (varrer_teclado() != 'a') { // Caso a varredura não informe algo relevante (ou seja, caso a a função retorne "a") não damos prosseguimento à aquisição
+    if (varrer_teclado() == '#') {      // Caso a função retorne um símbolo válido,
+      while (varrer_teclado() == '#') { // ficaremos "presos" no while, até que a tecla deixe de ser pressionada.
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '#'; // Após a soltura do botão, gravamos a informação no buffer
+      i_buffer_teclado++;
+    }
+    // Tal procedimento foi adotado para todas as demais teclas.
+    else if (varrer_teclado() == '1') {
+      while (varrer_teclado() == '1') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '1';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '2') {
+      while (varrer_teclado() == '2') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '2';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '3') {
+      while (varrer_teclado() == '3') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '3';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '4') {
+      while (varrer_teclado() == '4') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '4';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '5') {
+      while (varrer_teclado() == '5') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '5';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '6') {
+      while (varrer_teclado() == '6') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '6';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '7') {
+      while (varrer_teclado() == '7') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '7';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '8') {
+      while (varrer_teclado() == '8') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '8';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '9') {
+      while (varrer_teclado() == '9') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '9';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '0') {
+      while (varrer_teclado() == '0') {
+        //do nothing
+      }
+      buffer_teclado[i_buffer_teclado] = '0';
+      i_buffer_teclado++;
+    }
+    else if (varrer_teclado() == '*') {
+      while (varrer_teclado() == '*') {
+        //do nothing
+      }
+      // Quando, finalmente a tecla "*" foi pressionada, proseguimos para o processamento da mensagem no buffer do teclado.
+      buffer_teclado[i_buffer_teclado] = '*';
+      if (i_buffer_teclado != 0 && i_buffer_teclado != 1) {   // Garantimos que, para que a mensagem seja válida, exista 3 digitos no buffer.
+        if (buffer_teclado[i_buffer_teclado - 2] == '#') {    // Para assegurar que trata-se de uma mensagem válida, o antepenúltimo dígito deverá ser "#"
+          if (buffer_teclado[i_buffer_teclado - 1] == '1') {  // A partir daqui, começa a analizar o penúltimo dígito.
+            // Caso o penúltimo dígito seja 1, ativamos uma rotina de piscar o LED, para indicar a responsividade do sistema.
+            i_buffer_teclado = 0; // Em todos os casos, o índice do buffer do teclado foi zerado, a fim de, em uma próxima execução, outra mensagem ser processada.
+            pisca_led = 1;  // Aqui setamos 1 para a flag de piscar o LED, tratada na rotina de interrupção.
+          }
+          else if (buffer_teclado[i_buffer_teclado - 1] == '2') {
+            // Caso o penúltimo dígito seja 2, realizamos uma medição e gravamos na memória. O procedimento de gravação foi explicado anteriormente.
+            i_buffer_teclado = 0;
+            pos_memoria++;
+            byte medida_armazenar = (byte)(analogRead(ldr) >> 2);
+            ic_eeprom.write_byte(pos_memoria, medida_armazenar);
+          }
+          //*****************************************PARAMOS POR AQUI****************************************************************************
+          else if (buffer_teclado[i_buffer_teclado - 1] == '3') {
+            // Caso o penúltimo dígito seja 3, ativamos a medição automática. Isso é feito através de uma Flag que é tratada na rotina de interrupção.
+            // Exatamente por isso, as medições automáticas são feitas a cada 1s.
+            i_buffer_teclado = 0;
+            medicao_automatica = 1;
+          }
+          else if (buffer_teclado[i_buffer_teclado - 1] == '4') {
+            // Caso o penúltimo dígito seja 4, desativamos a medição automática.
+            i_buffer_teclado = 0;
+            medicao_automatica = 0;
+          }
+        }
+        else {
+          // Caso "*" seja pressionado, mas as teclas anteriores não esteja em nenhuma das verificações acima,
+          // imprimimos no monitor serial uma mensagem de erro e zeramos o buffer para novas aquisições.
+          Serial.println("Mensagem não compreendida");
+          i_buffer_teclado = 0;
+        }
+      }
+      else {
+        i_buffer_teclado = 0; // Caso o antepenúltimo dígito não seja um "#", já saímos da rotina de tratamento do penúltimo dígito,
+        // zerando o buffer para as próximas aquisições.
+      }
+    }
+  }
+  if (medir_automaticamente) {
+    // Neste trecho do código, o programa executa a medida para o caso de que a Flag de medição automática esteja ativada.
+    // Lembrando que uma vez que a Flag de medição esteja ativada, a cada 1s efetuamos a medição.
+    // Fazemos isso setando 1 na flag "medir_automaticamente" a cada passagem pela rotina de interrupção.
+    pos_memoria++;
+    byte medida_armazenar = (byte)(analogRead(ldr) >> 2);//deslocar 2 bits => EEPROM Armazena 8 bits;
+    ic_eeprom.write_byte(pos_memoria, medida_armazenar);
+    medir_automaticamente = 0; // Zeramos a flag para que, durante vários loops entre duas interrupções, somente executemos uma vez a medição, gravando na memória.
+  }
+}
