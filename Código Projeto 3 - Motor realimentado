@@ -1,0 +1,109 @@
+// - BIBLIOTECAS
+#include <TimerOne.h>         // Biblioteca para implementação de interrupções
+
+// - PINAGEM
+// Definição da pinagem utilizada pelos periféricos
+int motor = 3;                // Pino do motor => PWM
+int receptor = 2;             // Pino do receptor de infravermelho, utilizado no sensor de velocidade
+
+// - VARIAVEIS
+float velocidade_atual = 0;         // Representa a velocidade "atual" do motor
+float velocidade_desejada = 0;      // Velocidade desejada do motor
+char buffer[100];                   // Buffer utilizado na recepção das mensagens do computador via UART
+int i_buffer = 0;                   // Índice utilizado para o armazenamento das mensagens no buffer
+float erro = 0;                     // Representa o erro utilizado na realimentação do sistema do motor
+float esforco_controle = 0;         // Esforço realizado pelo contrador (utilizado com parâmetro do analogWrite)
+                                    // representando o nível de tensão a ser aplicado no pino do motor
+float k = 0.01;                     // Constante utilizada no controlador propocional
+int interrompe = 0;                 // Indica quantas vezes a hélice do motor passa pelo sensor infravermelho, gerando uma interrupcao externa
+
+// - ROTINAS
+void handler_timer() {
+  // Nesta rotina, foi implementado o controle em malha fechada do motor.
+  // Em primeiro lugar, é checada a velocidade de giro do eixo do motor,
+  // então, calcula-se a disparidade dessa velocidade com a velocidade desejada,
+  // passada através da comunicação serial. A partir do caculo deste "erro", é possível
+  // incrementar (ou decrementar) o nível de tensão na base do transistor, portanto é possível
+  // acelerar (ou desacelerar) o motor através do analogWrite.
+  // Observe que esta rotina é acionada através da interrupção interna do microcontrolador, isto é,
+  // à cada 0.5 segundos.
+
+  velocidade_atual = interrompe * 2 * 60 / 3; // Aqui, é interessante ressaltar que a velocidade atual do motor
+                                              // está ligada ao número de vezes que as hélices interrompem o motor.
+                                              // O cálculo da velocidade do motor é realizado da seguinte forma:
+                                              // Temos que a velocidade é dada pelo número de interrupções externas
+                                              // vezes dois (interrupção interna de 0.5 s)
+                                              // vezes 60 (queremos em RPM),
+                                              // dividido por três, já que são três hélices.
+
+  // Imprimimos a velocidade atual e zeramos o contator de interrupções externas,
+  // pois no novo acionamento da interrupção interna, teremos que checar uma nova velocidade
+  Serial.print("Velocidade: ");
+  Serial.print(velocidade_atual);
+  Serial.println("RPM");
+  interrompe = 0;
+
+  // Implementação do controlador proporcional através do cálculo do erro entre entrada e saída
+  erro = velocidade_atual - velocidade_desejada;
+  esforco_controle = esforco_controle - k * erro;
+
+  // Aqui, garantimos que o esforço de controle nunca ultrapasse o máximo do analogWrite (255).
+  // Além disso, garantimos que o esforço de controle nunca seja menor que 0.
+  if (esforco_controle > 255) {
+    esforco_controle = 255;
+  }
+  if (esforco_controle < 0) {
+    esforco_controle = 0;
+  }
+
+  // Aqui, passamos o novo nível de tensão para o motor, calculado a partir do controlador.
+  analogWrite(motor, esforco_controle);
+  Serial.println(esforco_controle);
+}
+
+void interruption () {
+  // Esta rotina simplesmente incrementa o número de interrupções causada pela passagem das hélices
+  // pelo sensor de velocidade (infravermelho).
+  interrompe++;
+}
+
+void setup() {
+  // Aqui, definimos os parâmetros a serem iniciados no código.
+  Serial.begin(9600);                         // Inicializa a comunicação serial com baud rate de 9600.
+  Timer1.initialize(500000);                  // Interrompe a cada 0.5 segundos.
+  Timer1.attachInterrupt(handler_timer);      // À cada interrupção chamaremos a rotina previamente definida (handler_timer).
+
+  // Motor será um pino de saída para o Arduino
+  // LED receptor de infravermelho será entrada para o Arduino
+  pinMode(motor, OUTPUT);
+  pinMode(receptor, INPUT);
+
+  // Aqui, temos a atribuição da borda de descida (poderia ser também de subida)
+  // de um evento externo, no caso a passagem de uma hélice pelo sensor infravemelho,
+  // à rotina "interruption" previamente explicada
+  attachInterrupt(0, interruption, FALLING);  // Observe que o primeiro parâmetro tem o valor 0, pois está definido na bilbioteca
+                                              // que este parâmetro equivale à associar a interrupção externa ao pino 2 (digital)
+                                              // do arduino. Foi escolhido o pino 2 devido à restrição do fabricante ao pré estabelcer
+                                              // os pinos que podem ser ligados às interrupções externas.
+}
+
+void loop() {
+  // Aqui, segue o código que será colocado para rodar em loop,
+  // que consiste basicamente em receber o valor para a velocidade desejada.
+  while (Serial.available() > 0) {
+    // Vale lembrar da implementação feita na experiência 2, que foi muito semelhante à utilizada nesta experiência.
+    // Aqui temos a aquisição dos dados da comunicação serial
+    buffer[i_buffer] = Serial.read();
+    i_buffer++;
+    if (buffer[i_buffer - 1] == '\n') {
+      buffer[i_buffer - 1] = '\0';
+      // Conversão de char para inteiro.
+      velocidade_desejada = atoi(buffer);
+      i_buffer = 0;
+      // Imprimimos a velocidade desejada.
+      Serial.print("Velocidade desejada: ");
+      Serial.print(velocidade_desejada);
+      Serial.println(" RPM");
+    }
+  }
+}
