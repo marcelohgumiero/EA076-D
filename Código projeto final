@@ -1,0 +1,279 @@
+// - BIBLIOTECAS
+#include <TimerOne.h>         // Biblioteca para implementação de interrupções
+
+// - PINAGEM
+// Definição da pinagem utilizada pelos periféricos
+// Ponte H
+int motor = 9;                // Pino do motor => PWM
+int entrada1 = 3;             // entrada 1 e entrada 2 são utilizadas para definir quais transistores da ponte H estão polarizados,
+int entrada2 = 4;             // o que estabelece o sentido de giro do motor
+// Push buttons 
+int push_liga_desliga = 5;            // Botão utilizado para ligar/desligar o motor
+int push_sentido = 6;                 // Botão utilizado para definir o sentido de giro
+int push_incrementa_velocidade = 7;   // Botão utilizado para incrementar o valor utilizado para o duty cicle do motor (incremento de valores discretos)
+int push_decrementa_velocidade = 8;   // Idem, para decremento
+int push_demanda_passo = 10;          // Utilizado para definir o passo de incremento/decremento
+int push_remoto = 11;                 // Botão utilizado para habilitar o acesso remoto
+int potenciometro = A0;               // Potenciômetro utilizado para incremento contínuo de velocidade
+//Outros
+int LEDs  = 13;               // LED utilizado para mostrar o sentido de giro
+                              // Obs: Foram utilizados dois LEDs em uma configuração complementar                      
+                              // Isto é, enquanto um está desligado, o outro está ligado, e isto é
+                              // controlado pelo mesmo pino
+// - VARIAVEIS
+// Buffer
+char buffer[100];                   // Buffer utilizado na recepção das mensagens do computador via UART
+int i_buffer = 0;                   // Índice utilizado para o armazenamento das mensagens no buffer
+// Controle do motor
+float passo_incremento_decremento = 0;   // Passo discreto para o incremento e decremento do motor
+int pwm_alimentacao = 0;                 // Define o duty cicle utilizado como alimentação do motor
+int sentido = 1;                         // Define o sentido de giro do motor: 1 ou 2, dependendo do sentido.
+                                         // Observe que o sentido (horário ou anti-horário) pode ser alterado
+                                         // pela própria ligação do motor com a ponte H.
+// Flags
+boolean habilita_remoto = false;         // Flag que determina se o controle remoto está, ou não, habilitado
+                                         // Ficou definido que mesmo que o controle remoto esteja habilitado,
+                                         // pode-se utilizar o controle "manual presencial"
+boolean flag_velocidade_direta = false;  // Flag utilizada dentro do controle remotor, que permite ou não que o número
+                                         // enviado através do teclado seja utilizado com o próprio duty cicle, isso será
+                                         // melhor explicado, mais adiante.
+int flag_demanda_passo = 0;              // Se 1, o próximo número enviado pelo teclado será o passo de incremento/decremento.
+                                         // Se 2, habilita o passo contínuo através do potenciômetro.
+// Outros
+float leitura = 0;                       // Utilizada para recepção dos números recebidos atráves do teclado (comunicação serial)
+
+// - ROTINAS
+void leituras_push() {
+  // Está rotina foi utilizada para fazer o tratamento do pressionamento dos botões. Tal rotina é constantemente chamada no LOOP.
+  // Observe que a rotina de cada botão só será, de fato, lida se o botão pressionado for solto. Isto é, deve-se pressionar o botão e,
+  // em seguida, soltá-lo para que a rotina associada a esse botão seja executada.
+  if (digitalRead(push_liga_desliga)) {
+    // Caso o botão de liga/desliga for pressionado, o procedimento é o seguinte:
+    // Se a alimentação do motor seja 0, isto é, caso esteja desligado, ligamos imediatamente o motor,
+    // caso a alimentação seja qualquer outro valor, isto é, caso esteja ligado, desligamos imediatamente o motor.
+    // Em uma interface usual de um inversor de frequência, pode-se definir o tempo levada para o ligamento e desligamento do motor,
+    // no entanto, neste projeto, foi priorisado o desenvovimento de outras aplicações.
+    while (digitalRead(push_liga_desliga));
+    if (pwm_alimentacao == 0) {
+      pwm_alimentacao = 255;
+      troca_sentido();
+      Serial.println("Ligando...");
+    }
+    else {
+      pwm_alimentacao = 0;
+      Serial.println("Desligando...");
+    }
+  }
+
+  if (digitalRead(push_sentido)) {
+    // Esta rotina é bem simples:
+    // Troca o valor da variável "sentido", caso seja 1, mudamos para 2. Caso seja 2, mudamos para 1.
+    // Após a mudança, chamamos a rotina "troca_sentido()" que, basicamente,
+    //  aplica (mediante o valor da váriavel "sentido") o sentido de giro no motor.
+    while (digitalRead(push_sentido));
+    if (sentido == 1) {
+      sentido = 2;
+    }
+    else {
+      sentido = 1;
+    }
+    troca_sentido();
+  }
+
+  if (digitalRead(push_incrementa_velocidade)) {
+    // Somamos, na variável utilizada como valor do duty cile do motor,
+    // o passo definido, anteriomente, pelo teclado.
+    // Lembrando que o valor máximo para o duty cicle, é sempre 255 (2^8-1).
+    while (digitalRead(push_incrementa_velocidade));
+    pwm_alimentacao = pwm_alimentacao + passo_incremento_decremento;
+    if (pwm_alimentacao > 255) {
+      pwm_alimentacao = 255;
+    }
+    Serial.print("PWM desejado: ");
+    Serial.println(pwm_alimentacao);
+  }
+  if (digitalRead(push_decrementa_velocidade)) {
+    // Subtraímos, na variável utilizada como valor do duty cile do motor,
+    // o passo definido pelo teclado.
+    // Observe que asseguramos que o valor mínimo seja 0.
+    while (digitalRead(push_decrementa_velocidade));
+    pwm_alimentacao = pwm_alimentacao - passo_incremento_decremento;
+    if (pwm_alimentacao < 0) {
+      pwm_alimentacao = 0;
+    }
+    Serial.print("PWM desejado: ");
+    Serial.println(pwm_alimentacao);
+  }
+  
+  if (digitalRead(push_demanda_passo)) {
+    // Essa rotina foi pensada em termos do número de apertos no botão.
+    // Caso seja apertada 1 vez, o próximo valor digitado no teclado
+    // será implementado como passo para o incremento/decremento discreto.
+    // Caso seja apertada 2 vezes, habilitamos o incremento/decremento do passo via potenciômetro.
+    // Caso seja apertada 3 vezes, desabilitamos o mesmo.
+    while (digitalRead(push_demanda_passo));
+    flag_demanda_passo++;
+    if (flag_demanda_passo == 1) {
+      Serial.println("Por favor, digite o valor desejado para passo do incremento/decremento.");
+    }
+    if (flag_demanda_passo == 2) {
+      Serial.println("Controle de PWM via potenciometro habilitado");
+    }
+    if (flag_demanda_passo == 3) {
+      Serial.println("Controle de PWM via potenciometro desligado");
+      flag_demanda_passo = 0; // Observe que caso o passo por potenciômetro seja desabilitado,
+                              // retornamos à condição inicial.
+    }
+  }
+  
+  if (digitalRead(push_remoto)) {
+    // Esse botão haiblita ou desabilita o controle remoto, isto é, pelo teclado,
+    // simulando uma condição na qual não seja possível o acesso à interface física do inversor de frequência.
+    // Foi determinado, pelos alunos, que esta função não desabilitaria o controle "manual" do motor DC.
+    while (digitalRead(push_remoto));
+    habilita_remoto = !habilita_remoto;
+    if (habilita_remoto) {
+      Serial.println("Controle remoto habilitado");
+    }
+    else {
+      Serial.println("Controle remoto desabilitado");
+    }
+  }
+}
+
+void troca_sentido() {
+  // Tal rotina tem a função de "aplicar" o sentido no motor de acordo com as váriaveis
+  // entrada1 e entrada 2.
+  // Observe que, como foi montada uma ponte H pelos próprios alunos, excluíu-se a possibilidade
+  // de termos todos os transistores polarizados. Dessa forma, antes de qualquer configuração de polarização,
+  // sempre zeramos os pinos relacionados às bases dos transistores.
+  if (sentido == 1) {
+    digitalWrite(entrada2, LOW);
+    digitalWrite(entrada1, LOW);
+    digitalWrite(entrada1, HIGH);
+    digitalWrite(LEDs, LOW);
+  }
+  if (sentido == 2) {
+    digitalWrite(entrada2, LOW);
+    digitalWrite(entrada1, LOW);
+    digitalWrite(entrada2, HIGH);
+    digitalWrite(LEDs, HIGH);
+  }
+}
+
+void leitura_potenciometro() {
+  // Tal rotina tem a função de leitura do nível de tensão na resistência variável do potenciômetro.
+  // Foi observado, empiricamente, que a leitura de tensão ia de valores de 13 à 930 (10 bits de leitura).
+  // Para podermos utilizar isso como valores de duty cicle, teve que ser realizado um mapeamento entre
+  // os níveis de tensão do potenciômetro e os possíveis valores de duty cicle (de 0 à 255).
+  pwm_alimentacao = analogRead(potenciometro);
+  pwm_alimentacao = map(pwm_alimentacao, 13, 930, 0, 255);
+  Serial.println(pwm_alimentacao);
+}
+
+void setup() {
+  Serial.begin(9600);                         // Inicializa a comunicação serial com baud rate de 9600.
+  // As próximas linhas da rotina "setup" definem quais pinos serão saídas e quais serão entradas.
+  // Saídas são as que sofrem influência do lógica e as entradas são as que influenciam a lógica.
+  pinMode(motor, OUTPUT);
+  pinMode(entrada1, OUTPUT);
+  pinMode(entrada2, OUTPUT);
+  pinMode(push_liga_desliga, INPUT);
+  pinMode(push_sentido, INPUT);
+  pinMode(push_incrementa_velocidade, INPUT);
+  pinMode(push_decrementa_velocidade, INPUT);
+  pinMode(push_demanda_passo, INPUT);
+  pinMode(potenciometro, INPUT);
+  pinMode(LEDs, OUTPUT);
+}
+
+void loop() {
+  // Aqui, segue o código que será colocado para rodar em loop.
+  while (Serial.available() > 0) {
+    // Aqui temos a aquisição dos dados da comunicação serial
+    buffer[i_buffer] = Serial.read();
+    i_buffer++;
+    if (buffer[i_buffer - 1] == '\n') {
+      buffer[i_buffer - 1] = '\0';
+      // Conversão de char para inteiro.
+      leitura = atoi(buffer);
+      i_buffer = 0;
+      // À partir desta linha, teremos algumas condições de execuções, em geral, definidas pelos botões.
+      if (habilita_remoto) {
+        // Caso o controle remoto esteja habilidato (através da flag utilizada para tal), entramos em uma rotina que
+        // interpreta os seguintes comandos:
+        // Caso o teclado envie "1", ligamos ou desligamos o motor.
+        // Caso o teclado envie "2", mudamos o sentido de rotação do motor.
+        // Caso o teclado envie "3", esperamos um valor de duty cicle a ser enviado, igualmente, pelo teclado.
+        // As próximas linhas se assemelham em grande parte àquelas utilizadas no tratamento do pressionamento dos botões.
+        if (flag_velocidade_direta == false) {
+          // Importante notarmos aqui, que só entraremos nesse "if" caso não tenha sido enviado "3" pelo teclado, isto é,
+          // caso a próxima leitura recebida através do teclado não seja esperada como um valor de duty cicle.
+          if (leitura == 1) {
+            // A implementação é igual àquela utilizada para o botão.
+            if (pwm_alimentacao == 0) {
+              pwm_alimentacao = 255;
+              troca_sentido();
+              Serial.println("Ligando...");
+            }
+            else {
+              pwm_alimentacao = 0;
+              Serial.println("Desligando...");
+            }
+
+          }
+          if (leitura == 2) {
+            // A implementação é igual àquela utilizada para o botão.
+            if (sentido == 1) {
+              sentido = 2;
+            }
+            else {
+              sentido = 1;
+            }
+            troca_sentido();
+          }
+          if (leitura == 3) {
+            // Aqui, temos uma diferença.
+            // Caso seja recebido "3" pelo teclado, é esperado que o próximo
+            // número enviado pelo teclado seja um valor de duty cicle
+            flag_velocidade_direta = true;
+            Serial.println("Digite um valor para o PWM!");
+          }
+        }
+        else {
+          // Aqui é a rotina para quando a flag de recebimento direto de duty cicle está ativada
+          // Portanto, o próximo valor recebido do teclado será recebido com um valor a ser implementado
+          // na alimentação do motor e a flag será alterada, para voltarmos à condição original do controle remoto.
+          pwm_alimentacao = leitura;
+          Serial.print("PWM: ");
+          Serial.println(pwm_alimentacao);
+          flag_velocidade_direta = false;
+        }
+      }
+      else {
+        // Caso o controle remoto esteja desabilitado, as única informação esperada através do teclado
+        // é a do passo discreto a ser implementado via botão.
+        // E isto só acontecerá caso a flag incrementada pela rotina do pressionamento do botão seja 1. 
+        if (flag_demanda_passo == 1) {
+          passo_incremento_decremento = leitura;
+          flag_demanda_passo = 0;
+          // Imprimimos o passo desejado.
+          Serial.print("Passo desejado: ");
+          Serial.println(passo_incremento_decremento);
+        }
+      }
+    }
+  }
+  
+  if (flag_demanda_passo == 2) {
+    // Caso o botão seja pressionado duas vezes, isto é, caso a flag seja incrementada duas vezes,
+    // ativamos a leitura via potenciômetro. Isto é, o valor de duty cicle passa a ser determinado pelo
+    // valor de tensão sobre a resistência variável do potenciômetro.
+    leitura_potenciometro();
+  }
+  
+  leituras_push();  // Dentro do loop temos, ainda, a chamada da rotina que interpreta os botões.
+
+  analogWrite(motor, pwm_alimentacao); // Finalmente, depois de todas as atualizações necessárias no valor do duty cicle,
+                                       // podemos implementar o valor de duty cicle na porta associada ao motor.
+}
